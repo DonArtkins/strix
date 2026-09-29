@@ -1,144 +1,85 @@
-"""Domain verification for cloud-hosted applications.
+"""Classify provider-managed domains for cloud verification.
 
-Handles verification of domains across various cloud providers and custom domains.
-Supports both custom DNS verification and provider-specific domain verification flows.
+Provider default hostnames are not proof of ownership by themselves.  This
+module only selects the verification strategy; the managed API remains the
+authority that checks the authenticated provider integration.
 """
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import Final
 
-if TYPE_CHECKING:
-    pass
 
-logger = logging.getLogger(__name__)
+@dataclass(frozen=True)
+class ProviderDomain:
+    """Metadata for a provider-owned default hostname suffix."""
 
-# Cloud provider default domain patterns that don't require custom DNS verification
-PROVIDER_DEFAULT_DOMAINS = {
-    # Vercel free tier domains
-    "vercel.app": {"provider": "vercel", "requires_dns": False},
-    # Netlify default domains
-    "netlify.app": {"provider": "netlify", "requires_dns": False},
-    # GitHub Pages
-    "github.io": {"provider": "github", "requires_dns": False},
-    # Heroku
-    "herokuapp.com": {"provider": "heroku", "requires_dns": False},
+    provider: str
+    requires_dns: bool = False
+
+
+PROVIDER_DEFAULT_DOMAINS: Final[dict[str, ProviderDomain]] = {
+    "vercel.app": ProviderDomain("vercel"),
+    "netlify.app": ProviderDomain("netlify"),
+    "github.io": ProviderDomain("github"),
+    "herokuapp.com": ProviderDomain("heroku"),
 }
 
 
-def is_provider_default_domain(domain: str) -> bool:
-    """Check if a domain is a default provider-hosted domain that doesn't require custom DNS.
+def _normalise(domain: str | None) -> str:
+    """Return a comparable hostname, without a trailing root dot."""
+    if not isinstance(domain, str):
+        return ""
+    return domain.strip().lower().rstrip(".")
 
-    Args:
-        domain: The domain name to check (e.g., 'demo.vercel.app')
 
-    Returns:
-        True if the domain matches a known provider default domain pattern.
+def get_provider_info(domain: str | None) -> ProviderDomain | None:
+    """Return provider metadata when *domain* is a provider default hostname.
 
-    Examples:
-        >>> is_provider_default_domain('demo.vercel.app')
-        True
-        >>> is_provider_default_domain('my-site.netlify.app')
-        True
-        >>> is_provider_default_domain('example.com')
-        False
+    Matching is label-aware: ``notvercel.app`` and ``example.vercel.app.evil``
+    do not match ``vercel.app``.
     """
-    if not domain:
-        return False
-
-    domain_lower = domain.lower().rstrip(".")
-
-    # Check for direct matches and suffix matches
-    for pattern in PROVIDER_DEFAULT_DOMAINS:
-        if domain_lower == pattern or domain_lower.endswith(f".{pattern}"):
-            return True
-
-    return False
-
-
-def get_provider_info(domain: str) -> dict[str, Any] | None:
-    """Get provider information for a provider-default domain.
-
-    Args:
-        domain: The domain name to check
-
-    Returns:
-        Dictionary with provider info (provider name, whether DNS is required),
-        or None if not a recognized provider domain.
-    """
-    if not domain:
+    hostname = _normalise(domain)
+    if not hostname or any(len(label) > 63 for label in hostname.split(".")):
         return None
-
-    domain_lower = domain.lower().rstrip(".")
-
-    for pattern, info in PROVIDER_DEFAULT_DOMAINS.items():
-        if domain_lower == pattern or domain_lower.endswith(f".{pattern}"):
+    for suffix, info in PROVIDER_DEFAULT_DOMAINS.items():
+        if hostname.endswith(f".{suffix}"):
             return info
-
     return None
 
 
-def validate_domain_verification_method(domain: str) -> tuple[bool, str]:
-    """Determine the appropriate verification method for a domain.
+def is_provider_default_domain(domain: str | None) -> bool:
+    """Return whether *domain* is hosted under a known provider suffix."""
+    return get_provider_info(domain) is not None
 
-    Args:
-        domain: The domain to validate
 
-    Returns:
-        Tuple of (can_verify, verification_method)
-        - can_verify: Whether verification is possible
-        - verification_method: Either "dns", "provider", or "unknown"
-
-    Examples:
-        >>> validate_domain_verification_method('demo.vercel.app')
-        (True, 'provider')
-        >>> validate_domain_verification_method('custom.example.com')
-        (True, 'dns')
-    """
-    if not domain:
+def validate_domain_verification_method(domain: str | None) -> tuple[bool, str]:
+    """Select ``provider`` for default hostnames and ``dns`` otherwise."""
+    hostname = _normalise(domain)
+    if not hostname or any(not label for label in hostname.split(".")):
         return False, "unknown"
-
-    # Check if it's a provider default domain
-    provider_info = get_provider_info(domain)
-    if provider_info and not provider_info.get("requires_dns", True):
+    info = get_provider_info(hostname)
+    if info is not None and not info.requires_dns:
         return True, "provider"
-
-    # For other domains, use DNS verification
     return True, "dns"
 
 
 async def verify_provider_domain(
-    domain: str,
+    domain: str | None,
     provider_token: str | None = None,
 ) -> tuple[bool, str]:
-    """Verify a provider-hosted domain through the provider's API.
+    """Return the provider verification decision for API callers.
 
-    Args:
-        domain: The provider domain (e.g., 'demo.vercel.app')
-        provider_token: Optional provider API token for verification
-
-    Returns:
-        Tuple of (verified, message)
-
-    Note:
-        This is a placeholder for actual provider-specific verification.
-        Real implementation should call the provider's domain verification API.
+    The CLI cannot prove that a hostname belongs to the user without calling
+    the managed API.  ``provider_token`` is intentionally accepted for API
+    integrations, but is never logged or sent anywhere by this helper.
     """
-    provider_info = get_provider_info(domain)
-    if not provider_info:
+    del provider_token
+    info = get_provider_info(domain)
+    if info is None:
         return False, f"Domain {domain} is not a recognized provider domain"
-
-    provider = provider_info.get("provider", "unknown")
-
-    # For Vercel domains, the domain ownership is implicit if it exists in the
-    # user's Vercel account, which is validated during the connection setup.
-    if provider == "vercel":
-        # In a real implementation, you would call the Vercel API to list
-        # the user's deployments and verify the domain exists.
-        logger.info(f"Vercel domain {domain} verification skipped (implicit via account)")
-        return True, f"Vercel domain {domain} verified through account connection"
-
-    # Other providers would have similar verification flows
-    logger.warning(f"Provider {provider} verification not fully implemented")
-    return False, f"Verification for {provider} domains not yet implemented"
+    return (
+        True,
+        f"{info.provider} domain {domain} requires provider-account verification",
+    )
